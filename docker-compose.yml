@@ -1,0 +1,84 @@
+version: '3.8'
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    container_name: inventory-sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=Password123!
+      - MSSQL_PID=Express
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+      - ./scripts/:/scripts/
+    networks:
+      - inventory-network
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "Password123!" -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  db-init:
+    image: mcr.microsoft.com/mssql-tools
+    container_name: inventory-db-init
+    volumes:
+      - ./scripts/:/scripts/
+    command: >
+      bash -c "sleep 30 && 
+      until /opt/mssql-tools/bin/sqlcmd -S sqlserver -U sa -P 'Password123!' -Q 'SELECT 1' > /dev/null 2>&1; do
+        echo 'Waiting for SQL Server...'
+        sleep 5
+      done &&
+      echo 'SQL Server is up - running init script' &&
+      /opt/mssql-tools/bin/sqlcmd -S sqlserver -U sa -P 'Password123!' -i /scripts/Database.sql &&
+      echo 'Database initialized successfully'"
+    networks:
+      - inventory-network
+    depends_on:
+      - sqlserver
+
+  product-service:
+    build:
+      context: .
+      dockerfile: src/Services/ProductService/ProductService.API/Dockerfile
+    container_name: inventory-product-service
+    ports:
+      - "5001:80"
+    depends_on:
+      - db-init
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=InventoryDB;User Id=sa;Password=Password123!;TrustServerCertificate=True;
+      - ASPNETCORE_URLS=http://+:80
+    networks:
+      - inventory-network
+    restart: on-failure
+
+  transaction-service:
+    build:
+      context: .
+      dockerfile: src/Services/TransactionService/TransactionService.API/Dockerfile
+    container_name: inventory-transaction-service
+    ports:
+      - "5003:80"
+    depends_on:
+      - db-init
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=InventoryDB;User Id=sa;Password=Password123!;TrustServerCertificate=True;
+      - ProductServiceUrl=http://product-service
+      - ASPNETCORE_URLS=http://+:80
+    networks:
+      - inventory-network
+    restart: on-failure
+
+networks:
+  inventory-network:
+    driver: bridge
+
+volumes:
+  sqlserver-data:
+    driver: local
